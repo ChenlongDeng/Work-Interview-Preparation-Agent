@@ -1,0 +1,26 @@
+{
+  "mcpServers": {
+    "lark-mcp": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@larksuiteoapi/lark-mcp",
+        "mcp",
+        "-a",
+        "${LARK_MCP_APP_ID}",
+        "-s",
+        "${LARK_MCP_APP_SECRET}",
+        "--oauth",
+        "-t",
+        "preset.default,drive.v1.file.list,drive.v1.meta.batchQuery,drive.v1.file.createFolder,drive.v1.file.move,drive.v1.file.copy,drive.v1.file.delete,docx.v1.document.create,docx.v1.document.get,bitable.v1.appTableField.create,bitable.v1.appTableField.update,bitable.v1.appTableRecord.batchCreate,bitable.v1.appTableRecord.batchUpdate,bitable.v1.appTableRecord.delete,bitable.v1.appTableRecord.batchDelete,bitable.v1.appTableRecord.get,bitable.v1.app.get"
+      ]
+    },
+    "chrome-devtools": {
+      "command": "npx",
+      "args": [
+        "chrome-devtools-mcp@latest"
+      ]
+    }
+  }
+}
+

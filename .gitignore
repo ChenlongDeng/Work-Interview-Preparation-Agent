@@ -1,0 +1,5 @@
+.env.mcp.local
+.vibe-coding-config/.env.mcp.local
+.vibe-coding-config/mcp/mcp.json
+.mcp.json
+.gemini/settings.json
