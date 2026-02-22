@@ -1,1 +1,0 @@
-/Users/dylan/Documents/Github/Work-Interview-Preparation-Agent/.vibe-coding-config/memory/AGENTS.md
