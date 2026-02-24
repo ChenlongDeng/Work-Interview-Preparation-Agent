@@ -1,134 +1,82 @@
-# 项目内 Vibe Coding 统一配置（Codex + Claude）
+# Vibe Coding 统一配置（Codex + Claude + Kimi）
 
-这套配置的目标是：
-- 只维护项目内的一份源配置；
-- 一条脚本同步到 Codex / Claude 的原生读取位置；
-- 敏感信息不入库。
-
-## 设计逻辑
-
-系统分成两层：
-1. 源配置层（可维护）：`.vibe-coding-config/**`
-2. 运行时层（工具实际读取）：`.mcp.json`、`.codex/config.toml`、`.codex/agents/profiles`、`.claude/agents`
-
-同步脚本负责把“源配置层”投影到“运行时层”。
+一份源配置，一条脚本同步到 Codex / Claude / Kimi 运行时位置。
 
 ## 目录结构
 
-- `mcp/mcp.template.json`：MCP 唯一源模板（可提交，推荐只放 `${VAR}` 占位）
-- `mcp/mcp-add-history.sh`：`mcp add` 命令账本（默认不执行）
-- `memory/AGENTS.md`：统一记忆主文件
-- `skills/<skill_id>/SKILL.md`：技能源文件
-- `agents.toml`：Agents 唯一源（Codex 原生 TOML）
-- `agent-profiles/**`：Codex profiles 唯一源（会镜像同步到 `.codex/agents/profiles`）
-- `scripts/sync-configs.sh`：唯一同步入口
-- `.env.mcp.local`：MCP 敏感变量（不提交）
+```
+.vibe-coding-config/
+├── agents.toml              # Worker agents 定义（不含主 Agent）
+├── agent-model-matrix.json  # Worker 在各平台的模型映射
+├── mcp/
+│   └── mcp.template.json    # MCP 模板（占位符，可提交 git）
+├── .env.mcp.local           # 密钥（gitignore）
+├── memory/
+│   └── AGENTS.md            # 主 Agent 指令源
+├── skills/
+│   └── feishu-init/         # 飞书初始化 skill
+├── agent-profiles/          # Codex profiles 源
+└── scripts/
+    └── sync-configs.sh      # 同步入口
+```
 
-## 唯一同步脚本
+## 同步命令
 
 ```bash
-./.vibe-coding-config/scripts/sync-configs.sh mcp
-./.vibe-coding-config/scripts/sync-configs.sh memory
-./.vibe-coding-config/scripts/sync-configs.sh skills
-./.vibe-coding-config/scripts/sync-configs.sh agents
-./.vibe-coding-config/scripts/sync-configs.sh all
-./.vibe-coding-config/scripts/sync-configs.sh dry-run
-
-# 仅显式导入账本（默认不会执行账本）
-./.vibe-coding-config/scripts/sync-configs.sh --import-history mcp
+./.vibe-coding-config/scripts/sync-configs.sh mcp        # MCP 配置
+./.vibe-coding-config/scripts/sync-configs.sh memory      # 主 Agent 指令 → AGENTS.md / CLAUDE.md
+./.vibe-coding-config/scripts/sync-configs.sh skills      # Skills 软链接
+./.vibe-coding-config/scripts/sync-configs.sh agents      # Workers → Codex + Claude + Kimi
+./.vibe-coding-config/scripts/sync-configs.sh all-core    # mcp + skills + agents（推荐开发期）
+./.vibe-coding-config/scripts/sync-configs.sh all         # 全部（含 memory）
+./.vibe-coding-config/scripts/sync-configs.sh dry-run     # 预览
 ```
 
-## 每个命令做什么
+## 同步目标
 
-- `mcp`
-  - 读取 `mcp.template.json`
-  - 解析 `${VAR}`（来自 `.env.mcp.local`）
-  - 可选导入 `mcp-add-history.sh` 中 `# @mcp-add {...}`
-  - 写入项目根 `.mcp.json`（Claude project MCP）
-  - 写入项目内 `.codex/config.toml` 的 MCP managed block
+| 命令 | 生成文件 |
+|------|----------|
+| `mcp` | `.mcp.json`（Claude）、`.codex/config.toml` MCP 块 |
+| `memory` | `AGENTS.md`、`CLAUDE.md`（从 `memory/AGENTS.md` 复制）|
+| `skills` | `.agents/skills` 软链接 |
+| `agents` | `.claude/agents/*.md`、`.kimi/agents/*.md`、`.codex/config.toml` agents 块 |
 
-- `memory`
-  - 维护根目录软链接：`AGENTS.md`、`CLAUDE.md`
-  - 二者都指向 `.vibe-coding-config/memory/AGENTS.md`
+## 模型映射
 
-- `skills`
-  - Codex：`.agents/skills -> .vibe-coding-config/skills`（软链接）
-  - 不再导出到 Claude slash commands
+`agent-model-matrix.json` 控制各 worker 在不同平台使用的模型：
 
-- `agents`
-  - 只读 `agents.toml`（单一源）
-  - 同步 `agent-profiles/**` 到 `.codex/agents/profiles/**`
-  - 写入 `.codex/config.toml` 的 agents managed block
-  - 自动生成 `.claude/agents/<agent_name>.md`
-
-- `all`
-  - 依次执行：`mcp` + `memory` + `skills` + `agents`
-
-- `dry-run`
-  - 不改文件，只打印源与目标、可解析的 MCP 服务列表
-
-## 关于 Slash Commands 与 Skills
-
-- `slash commands`：给你用的触发入口（例如在 Claude 里输入 `/xxx`）。
-- `skills`：给模型用的能力说明与执行规范。
-- 这两者可以桥接，也可以分离。当前配置已关闭桥接，只保留 skills 本体。
-
-## Claude 同名导出与覆盖规则
-
-- 不使用前缀，直接导出同名文件。
-- 脚本通过文件首行标记 `<!-- managed-by: vibe-coding-config -->` 识别自己生成的文件。
-- 如果目标文件同名但不是脚本管理文件，脚本会跳过并告警，不会覆盖你的手写文件。
-
-## Codex Agents 源写法（推荐）
-
-在 `agents.toml` 里使用：
-
-```toml
-[agents.reviewer]
-description = "Review code changes and call out concrete risks."
-model = "gpt-5"
-tools = ["Read", "Grep", "Bash"]
-prompt = """
-You are a strict code reviewer.
-Focus on correctness and regression risk.
-"""
+```json
+{
+  "strict": true,
+  "agents": {
+    "worker_collector": {
+      "codex": "gpt-5.3-codex",
+      "claude": "claude-sonnet-4-6",
+      "kimi": "kimi-k2.5"
+    }
+  }
+}
 ```
 
-目前脚本会从每个 `[agents.<name>]` 解析这些字段：
-- `description`（可选）
-- `model`（可选）
-- `tools`（可选，字符串数组）
-- `prompt`（可选，支持 `"""..."""` 多行）
+- `strict=true`：每个 worker 必须有 codex + claude 映射
+- `kimi` 字段可选
 
-## MCP 更新方式
+## Agent 架构
 
-1. 修改模板：`mcp/mcp.template.json`
-2. 本地敏感值写入：`.env.mcp.local`
-3. 预览：
+- **主 Agent**：定义在 `memory/AGENTS.md`，负责编排流程
+- **worker_collector**：从小红书帖子提取问答（并行）
+- **worker_qa_processor**：单题标准化、去重、写回飞书（串行）
+
+## 环境变量
+
+飞书配置通过 `.env.mcp.local` 注入：
+
 ```bash
-./.vibe-coding-config/scripts/sync-configs.sh dry-run
+LARK_MCP_APP_ID=cli_xxx
+LARK_MCP_APP_SECRET=xxx
+FEISHU_BASE_PATH="云盘/AI/八股复习"
+FEISHU_BASE_NAME="面试题知识库"
+FEISHU_APP_TOKEN="xxx"
+FEISHU_POSTS_TABLE_ID="tblXxx"
+FEISHU_KNOWLEDGE_TABLE_ID="tblYyy"
 ```
-4. 同步：
-```bash
-./.vibe-coding-config/scripts/sync-configs.sh mcp
-```
-5. 重新打开 Codex / Claude 会话。
-
-## 安全与 Git
-
-建议忽略：
-- `.vibe-coding-config/.env.mcp.local`
-- `.mcp.json`
-- `.codex/config.toml`
-- `.claude/settings.local.json`
-
-建议提交前执行：
-```bash
-git status
-```
-确认没有敏感信息。
-
-## 注意事项
-
-- `mcp-add-history.sh` 默认只是账本，不自动执行。
-- Codex 要读取项目内 `.codex/config.toml`，该项目需要在 Codex 中处于 trusted 状态。

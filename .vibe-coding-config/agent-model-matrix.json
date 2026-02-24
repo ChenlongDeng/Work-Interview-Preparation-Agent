@@ -1,0 +1,15 @@
+{
+  "strict": true,
+  "agents": {
+    "worker_collector": {
+      "codex": "gpt-5.3-codex",
+      "claude": "claude-sonnet-4-6",
+      "kimi": "kimi-k2.5"
+    },
+    "worker_qa_processor": {
+      "codex": "gpt-5.3-codex",
+      "claude": "claude-sonnet-4-6",
+      "kimi": "kimi-k2.5"
+    }
+  }
+}

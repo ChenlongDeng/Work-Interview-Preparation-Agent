@@ -23,9 +23,11 @@ SKILLS_SOURCE_DIR="$VIBE_DIR/skills"
 CODEX_SKILLS_LINK="$ROOT_DIR/.agents/skills"
 CODEX_SKILLS_LINK_TARGET="../.vibe-coding-config/skills"
 CLAUDE_AGENTS_DIR="$ROOT_DIR/.claude/agents"
+KIMI_AGENTS_DIR="$ROOT_DIR/.kimi/agents"
 CODEX_AGENT_SOURCE_FILE="$VIBE_DIR/agents.toml"
 CODEX_PROFILE_SOURCE_DIR="$VIBE_DIR/agent-profiles"
 CODEX_PROFILE_TARGET_DIR="$ROOT_DIR/.codex/agents/profiles"
+AGENT_MODEL_MATRIX_FILE="$VIBE_DIR/agent-model-matrix.json"
 
 MCP_BEGIN="# >>> vibe-coding-config mcp >>>"
 MCP_END="# <<< vibe-coding-config mcp <<<"
@@ -43,6 +45,7 @@ Usage:
   sync-configs.sh memory
   sync-configs.sh skills
   sync-configs.sh agents
+  sync-configs.sh all-core
   sync-configs.sh all
   sync-configs.sh dry-run
 
@@ -225,13 +228,16 @@ sync_memory() {
   mkdir -p "$(dirname "$MEMORY_FILE")"
   [[ -f "$MEMORY_FILE" ]] || : >"$MEMORY_FILE"
 
-  ln -sfn ".vibe-coding-config/memory/AGENTS.md" "$ROOT_DIR/AGENTS.md"
-  ln -sfn ".vibe-coding-config/memory/AGENTS.md" "$ROOT_DIR/CLAUDE.md"
+  # Publish as real files (not symlinks).
+  [[ -L "$ROOT_DIR/AGENTS.md" ]] && rm -f "$ROOT_DIR/AGENTS.md"
+  [[ -L "$ROOT_DIR/CLAUDE.md" ]] && rm -f "$ROOT_DIR/CLAUDE.md"
+  cp "$MEMORY_FILE" "$ROOT_DIR/AGENTS.md"
+  cp "$MEMORY_FILE" "$ROOT_DIR/CLAUDE.md"
   if [[ -L "$ROOT_DIR/GEMINI.md" ]]; then
     rm -f "$ROOT_DIR/GEMINI.md"
     echo "ok: removed legacy GEMINI.md symlink"
   fi
-  echo "ok: linked AGENTS.md / CLAUDE.md"
+  echo "ok: synced memory files to AGENTS.md / CLAUDE.md"
 }
 
 is_managed_file() {
@@ -245,6 +251,43 @@ yaml_single_quote() {
   local value="$1"
   value="$(printf '%s' "$value" | sed "s/'/''/g")"
   printf "'%s'" "$value"
+}
+
+toml_basic_quote() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '"%s"' "$value"
+}
+
+load_agent_model_matrix() {
+  require_jq
+  if [[ ! -f "$AGENT_MODEL_MATRIX_FILE" ]]; then
+    echo "error: missing agent model matrix file: $AGENT_MODEL_MATRIX_FILE" >&2
+    exit 1
+  fi
+
+  if ! jq -ce '
+    if type != "object" then error("root must be object") else . end
+    | if (.agents | type) != "object" then error(".agents must be object") else . end
+    | if ((.strict // true) | type) != "boolean" then error(".strict must be boolean") else . end
+    | if ([.agents | to_entries[]? | (
+        .value
+        | type == "object"
+        and ((.codex // "") | type == "string")
+        and ((.claude // "") | type == "string")
+        and ((.codex // "") | length > 0)
+        and ((.claude // "") | length > 0)
+      )] | all)
+      then .
+      else error("each .agents.<name> must include non-empty codex and claude model strings")
+      end
+    | . + { strict: (.strict // true) }
+  ' "$AGENT_MODEL_MATRIX_FILE"; then
+    echo "error: invalid agent model matrix file: $AGENT_MODEL_MATRIX_FILE" >&2
+    exit 1
+  fi
+  # Note: kimi model is optional in the matrix (not enforced by strict mode)
 }
 
 extract_codex_agents_to_tmp() {
@@ -427,12 +470,29 @@ sync_skills() {
 }
 
 sync_agents() {
+  require_jq
   mkdir -p "$(dirname "$CODEX_PROJECT_CONFIG")" "$CLAUDE_AGENTS_DIR" "$CODEX_PROFILE_SOURCE_DIR" "$CODEX_PROFILE_TARGET_DIR"
+  local model_matrix_json matrix_strict
+  model_matrix_json="$(load_agent_model_matrix)"
+  matrix_strict="$(printf '%s' "$model_matrix_json" | jq -r '.strict')"
+
+  cleanup_stale_profile_dirs() {
+    local profiles_parent="$1"
+    local stale_dir
+    shopt -s nullglob
+    for stale_dir in "$profiles_parent"/.profiles-stage.* "$profiles_parent"/.profiles-old.*; do
+      [[ -d "$stale_dir" ]] || continue
+      rm -rf "$stale_dir"
+      echo "ok: cleaned stale profile staging dir $stale_dir"
+    done
+    shopt -u nullglob
+  }
 
   # Mirror codex agent profiles to runtime location with staging swap.
   local profiles_parent profiles_stage profiles_old
   profiles_parent="$(dirname "$CODEX_PROFILE_TARGET_DIR")"
   mkdir -p "$profiles_parent"
+  cleanup_stale_profile_dirs "$profiles_parent"
   profiles_stage="$(mktemp -d "$profiles_parent/.profiles-stage.XXXXXX")"
 
   if find "$CODEX_PROFILE_SOURCE_DIR" -mindepth 1 -print -quit | grep -q .; then
@@ -446,6 +506,7 @@ sync_agents() {
   fi
   if mv "$profiles_stage" "$CODEX_PROFILE_TARGET_DIR"; then
     [[ -n "$profiles_old" ]] && rm -rf "$profiles_old"
+    cleanup_stale_profile_dirs "$profiles_parent"
   else
     rm -rf "$profiles_stage"
     if [[ -n "$profiles_old" && -e "$profiles_old/profiles" ]]; then
@@ -457,22 +518,16 @@ sync_agents() {
   fi
   echo "ok: synced codex profiles to $CODEX_PROFILE_TARGET_DIR"
 
-  local codex_agents_block=""
-  if [[ -f "$CODEX_AGENT_SOURCE_FILE" ]]; then
-    codex_agents_block="$(cat "$CODEX_AGENT_SOURCE_FILE")"
-  fi
-  replace_managed_block "$CODEX_PROJECT_CONFIG" "$AGENTS_BEGIN" "$AGENTS_END" "$codex_agents_block"
-  echo "ok: updated $CODEX_PROJECT_CONFIG (agents block)"
-
-  local keep_file
-  keep_file="$(mktemp)"
   local extract_dir
   extract_dir="$(mktemp -d)"
+  local agent_names_file missing_models_file
+  agent_names_file="$(mktemp)"
+  missing_models_file="$(mktemp)"
 
   if [[ -f "$CODEX_AGENT_SOURCE_FILE" ]]; then
     if ! extract_codex_agents_to_tmp "$CODEX_AGENT_SOURCE_FILE" "$extract_dir"; then
       rm -rf "$extract_dir"
-      rm -f "$keep_file"
+      rm -f "$agent_names_file" "$missing_models_file"
       echo "error: failed to parse $CODEX_AGENT_SOURCE_FILE" >&2
       exit 1
     fi
@@ -481,12 +536,89 @@ sync_agents() {
   shopt -s nullglob
   local name_file key name desc prompt model target
   local tools_file tool_line
+
+  for name_file in "$extract_dir"/*.name; do
+    key="$(basename "$name_file" .name)"
+    name="$(cat "$name_file")"
+    echo "$name" >>"$agent_names_file"
+    local codex_model claude_model
+    codex_model="$(printf '%s' "$model_matrix_json" | jq -r --arg name "$name" '.agents[$name].codex // empty')"
+    claude_model="$(printf '%s' "$model_matrix_json" | jq -r --arg name "$name" '.agents[$name].claude // empty')"
+    if [[ "$matrix_strict" == "true" && ( -z "$codex_model" || -z "$claude_model" ) ]]; then
+      echo "$name" >>"$missing_models_file"
+    fi
+  done
+
+  if [[ -s "$missing_models_file" ]]; then
+    echo "error: missing model mappings for agents (strict=true):" >&2
+    sed 's/^/- /' "$missing_models_file" >&2
+    shopt -u nullglob
+    rm -rf "$extract_dir"
+    rm -f "$agent_names_file" "$missing_models_file"
+    exit 1
+  fi
+
+  local override_name
+  while IFS= read -r override_name; do
+    [[ -n "$override_name" ]] || continue
+    if ! grep -Fxq "$override_name" "$agent_names_file"; then
+      echo "warn: model matrix entry is not used by any agent: $override_name" >&2
+    fi
+  done < <(printf '%s' "$model_matrix_json" | jq -r '.agents | keys[]?')
+
+  local codex_agents_block_file
+  codex_agents_block_file="$(mktemp)"
   for name_file in "$extract_dir"/*.name; do
     key="$(basename "$name_file" .name)"
     name="$(cat "$name_file")"
     desc="$(cat "$extract_dir/$key.desc" 2>/dev/null || true)"
     prompt="$(cat "$extract_dir/$key.prompt" 2>/dev/null || true)"
-    model="$(cat "$extract_dir/$key.model" 2>/dev/null || true)"
+    tools_file="$extract_dir/$key.tools"
+
+    model="$(printf '%s' "$model_matrix_json" | jq -r --arg name "$name" '.agents[$name].codex // empty')"
+    if [[ -z "$model" ]]; then
+      model="$(cat "$extract_dir/$key.model" 2>/dev/null || true)"
+    fi
+
+    echo "[agents.${name}]" >>"$codex_agents_block_file"
+    if [[ -n "$desc" ]]; then
+      echo "description = $(toml_basic_quote "$desc")" >>"$codex_agents_block_file"
+    fi
+    if [[ -n "$model" ]]; then
+      echo "model = $(toml_basic_quote "$model")" >>"$codex_agents_block_file"
+    fi
+    if [[ -f "$tools_file" && -s "$tools_file" ]]; then
+      local tools_joined
+      tools_joined=""
+      while IFS= read -r tool_line; do
+        [[ -n "$tool_line" ]] || continue
+        if [[ -n "$tools_joined" ]]; then
+          tools_joined+=", "
+        fi
+        tools_joined+="$(toml_basic_quote "$tool_line")"
+      done <"$tools_file"
+      echo "tools = [${tools_joined}]" >>"$codex_agents_block_file"
+    fi
+    echo 'prompt = """' >>"$codex_agents_block_file"
+    printf '%s\n' "${prompt:-You are $name.}" >>"$codex_agents_block_file"
+    echo '"""' >>"$codex_agents_block_file"
+    echo >>"$codex_agents_block_file"
+  done
+
+  local codex_agents_block
+  codex_agents_block="$(cat "$codex_agents_block_file")"
+  replace_managed_block "$CODEX_PROJECT_CONFIG" "$AGENTS_BEGIN" "$AGENTS_END" "$codex_agents_block"
+  echo "ok: updated $CODEX_PROJECT_CONFIG (agents block)"
+  rm -f "$codex_agents_block_file"
+
+  rm -f "$CLAUDE_AGENTS_DIR"/*.md
+
+  for name_file in "$extract_dir"/*.name; do
+    key="$(basename "$name_file" .name)"
+    name="$(cat "$name_file")"
+    desc="$(cat "$extract_dir/$key.desc" 2>/dev/null || true)"
+    prompt="$(cat "$extract_dir/$key.prompt" 2>/dev/null || true)"
+    model="$(printf '%s' "$model_matrix_json" | jq -r --arg name "$name" '.agents[$name].claude // empty')"
     tools_file="$extract_dir/$key.tools"
 
     if [[ ! "$name" =~ ^[A-Za-z0-9._-]+$ ]]; then
@@ -495,48 +627,70 @@ sync_agents() {
     fi
     target="$CLAUDE_AGENTS_DIR/${name}.md"
 
-    # Do not overwrite user's unmanaged file with the same name.
-    if [[ -f "$target" ]] && ! is_managed_file "$target"; then
-      echo "warn: skip unmanaged file $target" >&2
-      continue
-    fi
-
     {
-      echo "$MANAGED_MARKER"
       echo "---"
-      echo "name: $(yaml_single_quote "$name")"
-      echo "description: $(yaml_single_quote "${desc:-$name}")"
+      echo "name: $name"
+      echo "description: ${desc:-$name}"
       if [[ -n "$model" ]]; then
-        echo "model: $(yaml_single_quote "$model")"
+        echo "model: $model"
       fi
       if [[ -f "$tools_file" && -s "$tools_file" ]]; then
         echo "tools:"
         while IFS= read -r tool_line; do
           [[ -n "$tool_line" ]] || continue
-          echo "  - $(yaml_single_quote "$tool_line")"
+          echo "  - $tool_line"
         done <"$tools_file"
       fi
       echo "---"
+      echo ""
       echo "${prompt:-You are $name.}"
     } >"$target"
 
-    echo "$(basename "$target")" >>"$keep_file"
     echo "ok: exported claude agent $target"
   done
 
-  local existing file_base
-  for existing in "$CLAUDE_AGENTS_DIR"/*.md; do
-    is_managed_file "$existing" || continue
-    file_base="$(basename "$existing")"
-    if ! grep -Fxq "$file_base" "$keep_file"; then
-      rm -f "$existing"
-      echo "ok: removed stale managed agent $existing"
+  # === Kimi agents export ===
+  mkdir -p "$KIMI_AGENTS_DIR"
+  rm -f "$KIMI_AGENTS_DIR"/*.md
+
+  for name_file in "$extract_dir"/*.name; do
+    key="$(basename "$name_file" .name)"
+    name="$(cat "$name_file")"
+    desc="$(cat "$extract_dir/$key.desc" 2>/dev/null || true)"
+    prompt="$(cat "$extract_dir/$key.prompt" 2>/dev/null || true)"
+    model="$(printf '%s' "$model_matrix_json" | jq -r --arg name "$name" '.agents[$name].kimi // empty')"
+    tools_file="$extract_dir/$key.tools"
+
+    if [[ ! "$name" =~ ^[A-Za-z0-9._-]+$ ]]; then
+      continue
     fi
+    target="$KIMI_AGENTS_DIR/${name}.md"
+
+    {
+      echo "---"
+      echo "name: $name"
+      echo "description: ${desc:-$name}"
+      if [[ -n "$model" ]]; then
+        echo "model: $model"
+      fi
+      if [[ -f "$tools_file" && -s "$tools_file" ]]; then
+        echo "tools:"
+        while IFS= read -r tool_line; do
+          [[ -n "$tool_line" ]] || continue
+          echo "  - $tool_line"
+        done <"$tools_file"
+      fi
+      echo "---"
+      echo ""
+      echo "${prompt:-You are $name.}"
+    } >"$target"
+
+    echo "ok: exported kimi agent $target"
   done
 
   shopt -u nullglob
   rm -rf "$extract_dir"
-  rm -f "$keep_file"
+  rm -f "$agent_names_file" "$missing_models_file"
 }
 
 dry_run() {
@@ -546,6 +700,7 @@ dry_run() {
 
   echo "dry-run: no files changed"
   echo "mode: project-only (no home directory writes)"
+  echo "aggregate modes: all-core=(mcp+skills+agents), all=(mcp+memory+skills+agents)"
   echo "mcp template: $template_file"
   echo "env file: $ENV_FILE (optional)"
   echo "history import: $IMPORT_HISTORY"
@@ -558,9 +713,40 @@ dry_run() {
   echo "- $CODEX_PROJECT_CONFIG (managed blocks only)"
   echo "- $CODEX_PROFILE_TARGET_DIR (mirrored from source)"
   echo "- $CODEX_SKILLS_LINK"
-  echo "- $CLAUDE_AGENTS_DIR/*.md (managed marker only)"
+  echo "- $CLAUDE_AGENTS_DIR/*.md (fully managed directory)"
+  echo "- $KIMI_AGENTS_DIR/*.md (fully managed directory)"
+  echo "- $AGENT_MODEL_MATRIX_FILE"
   echo "- $ROOT_DIR/AGENTS.md"
   echo "- $ROOT_DIR/CLAUDE.md"
+
+  local matrix_json matrix_strict matrix_count
+  if [[ -f "$AGENT_MODEL_MATRIX_FILE" ]]; then
+    if matrix_json="$(jq -ce '
+      if type != "object" then error("root must be object") else . end
+      | if (.agents | type) != "object" then error(".agents must be object") else . end
+      | if ((.strict // true) | type) != "boolean" then error(".strict must be boolean") else . end
+      | if ([.agents | to_entries[]? | (
+          .value
+          | type == "object"
+          and ((.codex // "") | type == "string")
+          and ((.claude // "") | type == "string")
+          and ((.codex // "") | length > 0)
+          and ((.claude // "") | length > 0)
+        )] | all)
+        then .
+        else error("each .agents.<name> must include non-empty codex and claude model strings")
+        end
+      | . + { strict: (.strict // true) }
+    ' "$AGENT_MODEL_MATRIX_FILE" 2>/dev/null)"; then
+      matrix_strict="$(printf '%s' "$matrix_json" | jq -r '.strict')"
+      matrix_count="$(printf '%s' "$matrix_json" | jq -r '.agents | keys | length')"
+      echo "agent model matrix: ok (strict=$matrix_strict, mapped_agents=$matrix_count)"
+    else
+      echo "agent model matrix: invalid ($AGENT_MODEL_MATRIX_FILE)"
+    fi
+  else
+    echo "agent model matrix: missing ($AGENT_MODEL_MATRIX_FILE)"
+  fi
 
   local servers
   if servers="$(load_mcp_servers 2>/dev/null)"; then
@@ -586,7 +772,7 @@ parse_args() {
       --import-history)
         import_history
         ;;
-      mcp|memory|skills|agents|all|dry-run)
+      mcp|memory|skills|agents|all-core|all|dry-run)
         MODE="$1"
         ;;
       -h|--help)
@@ -609,6 +795,7 @@ case "$MODE" in
   memory) sync_memory ;;
   skills) sync_skills ;;
   agents) sync_agents ;;
+  all-core) sync_mcp; sync_skills; sync_agents ;;
   all) sync_mcp; sync_memory; sync_skills; sync_agents ;;
   dry-run) dry_run ;;
   *)

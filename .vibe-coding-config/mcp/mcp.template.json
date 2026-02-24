@@ -12,7 +12,7 @@
         "${LARK_MCP_APP_SECRET}",
         "--oauth",
         "-t",
-        "preset.default,drive.v1.file.list,drive.v1.meta.batchQuery,drive.v1.file.createFolder,drive.v1.file.move,drive.v1.file.copy,drive.v1.file.delete,docx.v1.document.create,docx.v1.document.get,bitable.v1.appTableField.create,bitable.v1.appTableField.update,bitable.v1.appTableRecord.batchCreate,bitable.v1.appTableRecord.batchUpdate,bitable.v1.appTableRecord.delete,bitable.v1.appTableRecord.batchDelete,bitable.v1.appTableRecord.get,bitable.v1.app.get"
+        "preset.default,drive.v1.file.list,drive.v1.meta.batchQuery,drive.v1.file.createFolder,drive.v1.file.move,drive.v1.file.copy,drive.v1.file.delete,docx.v1.document.create,docx.v1.document.get,bitable.v1.app.create,bitable.v1.app.get,bitable.v1.appTable.list,bitable.v1.appTable.create,bitable.v1.appTableField.list,bitable.v1.appTableField.create,bitable.v1.appTableField.update,bitable.v1.appTableRecord.search,bitable.v1.appTableRecord.create,bitable.v1.appTableRecord.update,bitable.v1.appTableRecord.batchCreate,bitable.v1.appTableRecord.batchUpdate,bitable.v1.appTableRecord.delete,bitable.v1.appTableRecord.batchDelete,bitable.v1.appTableRecord.get"
       ]
     },
     "chrome-devtools": {
@@ -23,4 +23,3 @@
     }
   }
 }
-
